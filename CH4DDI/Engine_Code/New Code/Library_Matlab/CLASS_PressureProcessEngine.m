@@ -8,7 +8,7 @@ classdef CLASS_PressureProcessEngine
         DiscardedTakes                       % Logical array: true = discarded
         
         % Channel names in TDMS
-        PressureChannel = 'Ai7';              % Pressure signal
+        PressureChannel = 'Ai5';              % Pressure signal
         PilotFuelTriggerChannel = 'Di3';      % Diesel injection signal
         MainFuelTriggerChannel = 'Di4';       % H2 injection signal
         EncoderDegreeChannel = 'Di6';         % Encoder degree
@@ -134,9 +134,6 @@ classdef CLASS_PressureProcessEngine
                     
                     % Store in PressureInfo
                     this.PressureInfo(j).DataRaw = DataRaw;
-%                     this.PressureInfo(j).FileName = this.TakeFiles{j};
-%                     this.PressureInfo(j).TakeNumber = j - 1;  % 0-indexed
-                    
                     fprintf('✓\n');
                     
                 catch ME
@@ -144,8 +141,6 @@ classdef CLASS_PressureProcessEngine
                     
                     % Store empty
                     this.PressureInfo(j).DataRaw = [];
-%                     this.PressureInfo(j).FileName = this.TakeFiles{j};
-%                     this.PressureInfo(j).TakeNumber = j - 1;
                 end
             end
             
