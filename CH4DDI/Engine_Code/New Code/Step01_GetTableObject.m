@@ -10,6 +10,7 @@
 % 4. Saves table object for later processing
 %
 % test vscode git push
+% test vscode workspace
 %% Read table
 clearvars; close all; clc;
 
