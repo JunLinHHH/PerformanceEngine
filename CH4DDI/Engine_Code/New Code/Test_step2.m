@@ -38,24 +38,33 @@ SamplingRate_Local = 200000;
 SignalTimeScale = (0:length(PressureRaw)-1)/SamplingRate_Local; 
 
 %% Properties
-TDC_shift = -67;
+TDC_shift = -68;
 
 %% Build pressure signal & time vector
 SignalPressure = PressureRaw;
 
-%% --- Your filter chain ---
-SignalPressure_Filtered = bandstop(SignalPressure,[8800 11200],SamplingRate_Local);
-SignalPressure_Filtered = bandstop(SignalPressure_Filtered,[36000 42000],SamplingRate_Local);
-SignalPressure_Filtered = sgolayfilt(SignalPressure_Filtered, 3, 101);   % order 3, frame 101
-SignalPressure_Filtered = bandstop(SignalPressure_Filtered,[3400 3800],SamplingRate_Local);
+%% --- Method 1: Bandstop + Savitzky-Golay ---
+SignalPressure_Method1 = bandstop(SignalPressure,[8800 11200],SamplingRate_Local);
+SignalPressure_Method1 = bandstop(SignalPressure_Method1,[36000 42000],SamplingRate_Local);
+SignalPressure_Method1 = sgolayfilt(SignalPressure_Method1, 3, 101);
+SignalPressure_Method1 = bandstop(SignalPressure_Method1,[3400 3800],SamplingRate_Local);
 
-
-%% --- Old Butterworth filter method (added) ---
+%% --- Method 2: Butterworth only ---
 f_cutoff = 10000;  
 RPM = 1400;
 fc_norm  = f_cutoff / (7200*(RPM/60/2));        
-[b_old, a_old] = butter(2, fc_norm);           
-SignalPressure_BW = filtfilt(b_old, a_old, SignalPressure);
+[b_bw, a_bw] = butter(2, fc_norm);           
+SignalPressure_Method2 = filtfilt(b_bw, a_bw, SignalPressure);
+
+%% --- Method 3: Combined (Bandstop + Savitzky-Golay + Butterworth) ---
+SignalPressure_Method3 = bandstop(SignalPressure,[8800 11200],SamplingRate_Local);
+SignalPressure_Method3 = bandstop(SignalPressure_Method3,[36000 42000],SamplingRate_Local);
+SignalPressure_Method3 = bandstop(SignalPressure_Method3,[3400 3800],SamplingRate_Local);
+SignalPressure_Method3 = sgolayfilt(SignalPressure_Method3, 3, 51);   % shorter SG window to reduce ripple
+SignalPressure_Method3 = filtfilt(b_bw, a_bw, SignalPressure_Method3);
+
+% For backward compatibility
+SignalPressure_Filtered = SignalPressure_Method3;
 
 
 %% Plot time-domain: raw vs filtered (full)
@@ -63,13 +72,14 @@ t = SignalTimeScale;
 
 figure;
 subplot(2,1,1);
-plot(t, SignalPressure, 'k'); hold on;
-plot(t, SignalPressure_Filtered, 'r');
-plot(t, SignalPressure_BW, 'b');
+plot(t, SignalPressure, 'k', 'LineWidth', 1.5); hold on;
+plot(t, SignalPressure_Method1, 'r', 'LineWidth', 1);
+plot(t, SignalPressure_Method2, 'b', 'LineWidth', 1);
+plot(t, SignalPressure_Method3, 'm', 'LineWidth', 1);
 xlabel('Time [s]');
 ylabel('Pressure [bar]');
-title('Pressure Signal: Raw vs New Filter vs Butterworth (Full)');
-legend('Raw','Filtered','Butterworth');
+title('Pressure Signal Comparison (Full)');
+legend('Raw','Method1 (Bandstop+SG)','Method2 (Butterworth)','Method3 (Combined)','Location','best');
 grid on;
 
 % 👀 Zoom region
@@ -78,53 +88,82 @@ t_max = 0.015;
 idx = t >= t_min & t <= t_max;
 
 subplot(2,1,2);
-plot(t(idx), SignalPressure(idx), 'k'); hold on;
-plot(t(idx), SignalPressure_Filtered(idx), 'r');
-plot(t(idx), SignalPressure_BW(idx), 'b');
+plot(t(idx), SignalPressure(idx), 'k', 'LineWidth', 1.5); hold on;
+plot(t(idx), SignalPressure_Method1(idx), 'r', 'LineWidth', 1);
+plot(t(idx), SignalPressure_Method2(idx), 'b', 'LineWidth', 1);
+plot(t(idx), SignalPressure_Method3(idx), 'm', 'LineWidth', 1);
 xlabel('Time [s]');
 ylabel('Pressure [bar]');
 title(sprintf('Zoomed Region (%.4f–%.4f s)', t_min, t_max));
-legend('Raw','Filtered','Butterworth');
+legend('Raw','Method1','Method2','Method3','Location','best');
 grid on;
 
 
 %% Frequency-domain: PSD before vs after
 [PSD_raw, f_psd]  = pwelch(SignalPressure,[],[],[],SamplingRate_Local);
-[PSD_filt, ~]     = pwelch(SignalPressure_Filtered,[],[],[],SamplingRate_Local);
-[PSD_bw, ~]       = pwelch(SignalPressure_BW,[],[],[],SamplingRate_Local);
+[PSD_m1, ~]       = pwelch(SignalPressure_Method1,[],[],[],SamplingRate_Local);
+[PSD_m2, ~]       = pwelch(SignalPressure_Method2,[],[],[],SamplingRate_Local);
+[PSD_m3, ~]       = pwelch(SignalPressure_Method3,[],[],[],SamplingRate_Local);
 
 figure;
-loglog(f_psd, PSD_raw, 'k'); hold on;
-loglog(f_psd, PSD_filt, 'r');
-loglog(f_psd, PSD_bw, 'b');
+loglog(f_psd, PSD_raw, 'k', 'LineWidth', 1.5); hold on;
+loglog(f_psd, PSD_m1, 'r', 'LineWidth', 1);
+loglog(f_psd, PSD_m2, 'b', 'LineWidth', 1);
+loglog(f_psd, PSD_m3, 'm', 'LineWidth', 1);
 xlabel('Frequency [Hz]');
 ylabel('PSD');
-title('PSD: Raw vs Filtered vs Butterworth');
-legend('Raw','Filtered','Butterworth','Location','best');
+title('Power Spectral Density Comparison');
+legend('Raw','Method1 (Bandstop+SG)','Method2 (Butterworth)','Method3 (Combined)','Location','best');
 grid on;
 xlim([1 1e5]);
 
 
-%% Noise estimate (your existing block remains unchanged)
-noise_est = SignalPressure - SignalPressure_Filtered;
+%% Noise estimate for each method
+noise_est_m1 = SignalPressure - SignalPressure_Method1;
+noise_est_m2 = SignalPressure - SignalPressure_Method2;
+noise_est_m3 = SignalPressure - SignalPressure_Method3;
 
-[PSD_noise, f_noise] = pwelch(noise_est,[],[],[],SamplingRate_Local);
+[PSD_noise_m1, f_noise] = pwelch(noise_est_m1,[],[],[],SamplingRate_Local);
+[PSD_noise_m2, ~] = pwelch(noise_est_m2,[],[],[],SamplingRate_Local);
+[PSD_noise_m3, ~] = pwelch(noise_est_m3,[],[],[],SamplingRate_Local);
 
 figure;
-loglog(f_psd, PSD_raw, 'k'); hold on;
-loglog(f_noise, PSD_noise, 'r');
-legend('Raw','Raw - Filtered (noise estimate)');
+loglog(f_psd, PSD_raw, 'k', 'LineWidth', 1.5); hold on;
+loglog(f_noise, PSD_noise_m1, 'r', 'LineWidth', 1);
+loglog(f_noise, PSD_noise_m2, 'b', 'LineWidth', 1);
+loglog(f_noise, PSD_noise_m3, 'm', 'LineWidth', 1);
+xlabel('Frequency [Hz]');
+ylabel('PSD');
+title('Noise Spectrum (Raw - Filtered)');
+legend('Raw Signal','Noise M1','Noise M2','Noise M3','Location','best');
+grid on;
 
 
-%% Lag check (unchanged)
+%% Lag check for each method
 sig_raw = SignalPressure - mean(SignalPressure);
-sig_flt = SignalPressure_Filtered - mean(SignalPressure_Filtered);
+sig_m1 = SignalPressure_Method1 - mean(SignalPressure_Method1);
+sig_m2 = SignalPressure_Method2 - mean(SignalPressure_Method2);
+sig_m3 = SignalPressure_Method3 - mean(SignalPressure_Method3);
 
-[acor, lag] = xcorr(sig_flt, sig_raw, 'coeff');
-[~, I] = max(acor);
-lag_samples = lag(I);
-lag_time    = lag_samples / SamplingRate_Local;
-disp(lag_time);
+[acor_m1, lag] = xcorr(sig_m1, sig_raw, 'coeff');
+[~, I1] = max(acor_m1);
+lag_samples_m1 = lag(I1);
+lag_time_m1 = lag_samples_m1 / SamplingRate_Local;
+
+[acor_m2, ~] = xcorr(sig_m2, sig_raw, 'coeff');
+[~, I2] = max(acor_m2);
+lag_samples_m2 = lag(I2);
+lag_time_m2 = lag_samples_m2 / SamplingRate_Local;
+
+[acor_m3, ~] = xcorr(sig_m3, sig_raw, 'coeff');
+[~, I3] = max(acor_m3);
+lag_samples_m3 = lag(I3);
+lag_time_m3 = lag_samples_m3 / SamplingRate_Local;
+
+fprintf('\n=== Filter Lag Analysis ===\n');
+fprintf('Method 1 lag: %d samples (%.6f s)\n', lag_samples_m1, lag_time_m1);
+fprintf('Method 2 lag: %d samples (%.6f s)\n', lag_samples_m2, lag_time_m2);
+fprintf('Method 3 lag: %d samples (%.6f s)\n', lag_samples_m3, lag_time_m3);
 
 
 %% dP/dt (unchanged)
@@ -286,6 +325,7 @@ for i = 1:numel(fn)
     if isstruct(dig.(f)) && isfield(dig.(f), 'data')
         subplot( numel(fn)-2, 1, plotRow );   % -2 to ignore 'name' and 'Props'
         plot(dig.(f).data);
+        
         title(f);
         plotRow = plotRow + 1;
     end

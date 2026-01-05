@@ -20,9 +20,26 @@ function [EngineTestCase_info,TDMS_RawData,ProcessedData] = TDMS_Processing(Test
     IAT = 30;   %Intake Air temperature
     TW  = 90;   %Coolant temperature
 
-    % Folder path
-    MainDATA_folder = fullfile('C:\Users\chris\Desktop\Test Data');
-    Targetdataset_folder = fullfile(MainDATA_folder,num2str(TestDate),['_Set',num2str(SetN,'%02d'),'_',num2str(rpm),'_',num2str(IAT),'_',num2str(TW)]);
+    % Folder path - use char arrays instead of string arrays for exist() compatibility
+    MainDATA_folder = char(fullfile('I:\CH4DDI\Code_development\Chirs data\20240906_H2DDI'));
+    
+    % Convert SetN to number if it's a string
+    SetN_num = str2double(SetN);
+    
+    % Try both folder naming conventions (with and without leading zero)
+    Targetdataset_folder_v1 = char(fullfile(MainDATA_folder,num2str(TestDate),['_Set',num2str(SetN_num),'_',num2str(rpm),'_',num2str(IAT),'_',num2str(TW)]));
+    Targetdataset_folder_v2 = char(fullfile(MainDATA_folder,num2str(TestDate),['_Set',num2str(SetN_num,'%02d'),'_',num2str(rpm),'_',num2str(IAT),'_',num2str(TW)]));
+    
+    % Check which folder exists
+    if exist(Targetdataset_folder_v1, 'dir')
+        Targetdataset_folder = Targetdataset_folder_v1;
+        fprintf('Found folder: %s\n', Targetdataset_folder_v1);
+    elseif exist(Targetdataset_folder_v2, 'dir')
+        Targetdataset_folder = Targetdataset_folder_v2;
+        fprintf('Found folder: %s\n', Targetdataset_folder_v2);
+    else
+        error('Could not find data folder. Tried:\n  %s\n  %s', Targetdataset_folder_v1, Targetdataset_folder_v2);
+    end
     
     % Create a structure for storing process
     EngineTestCase_info = struct();
@@ -35,6 +52,11 @@ function [EngineTestCase_info,TDMS_RawData,ProcessedData] = TDMS_Processing(Test
     TDMS_files_numbers = length(TDMS_files);
     disp(['Selected folder: ',Targetdataset_folder]);
     disp(['Total ',num2str(TDMS_files_numbers), ' TDMS files']);
+    
+    % Check if any TDMS files found
+    if TDMS_files_numbers == 0
+        error('No TDMS files found in folder: %s', Targetdataset_folder);
+    end
     
     % Save result in struct
     % Save engine operating condition to structure
@@ -111,7 +133,7 @@ function [TDCs, Pressure_all, Injection_all] = Find_TDC(handles,rpm,TDC_shift)
         PulsTrace = handles{i,1}.Digital_channels.Untitled_6.data;
         CA_Enc_curr{i} = cumsum(double(PulsTrace>0 & ([1 PulsTrace(1:end-1)])==0))*0.2;
         a=1; 
-        b=round((60/rpm/1800)/handles{i,1}.Analog_channels.Dev0_Ai7.Props.wf_increment*5);
+        b=round((60/rpm/1800)/handles{i,1}.Analog_channels.Dev0_Ai5.Props.wf_increment*5);
         b=ones(b,1)/b;
         CA_Enc_curr{i} =filtfilt(b,a,CA_Enc_curr{i});
         CA_Enc_curr{i} = mod((CA_Enc_curr{i}-mean(CA_Enc_curr{i}(TDC_curr) - (1:length(TDC_curr))*720)),720)-360;
@@ -128,7 +150,7 @@ function [mean_H_injection,mean_injection,mean_pressure,P_single,IMEP,CoV,P_max,
         num_cycle = num_cycle + length(TDC{fn})-2;
         diffTDC = [diffTDC diff(TDC{fn})];
     end
-    RPM = 2*60/(mean(diffTDC)*handles{fn,1}.Analog_channels.Dev0_Ai7.Props.wf_increment);
+    RPM = 2*60/(mean(diffTDC)*handles{fn,1}.Analog_channels.Dev0_Ai5.Props.wf_increment);
     engine_speed_rpm = RPM;
     engine_speed_rps = engine_speed_rpm/60;
     engine_speed_CAps = engine_speed_rps* 360;
