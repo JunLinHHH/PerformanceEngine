@@ -1,100 +1,200 @@
-% Peng-Robinson EOS parameters
-% EOS parameters
+% H2 Injection Mass Calculation: Non-ideal (SRK) vs Ideal Gas Law
+
 clear; clc; close all
+
+% Add Library_Matlab to path for CLASS_SRK_EOS
+addpath('Library_Matlab');
 
 % -----------------------------------------
 saveName = 'C:\Users\z5058464\OneDrive - UNSW\CH4DDI\Engine\MassflowRate\Trial';
 % -----------------------------------------
-
+% Load data from Excel
+fileName = 'C:\Users\jun-y\OneDrive - UNSW\CH4DDI\Engine\MassflowRate\20251215_OldChamber_FlowRate.xlsx'; % Replace with the name of your Excel file
+sheetnames = 'H2_350_ST02_NonIdeal_B25_T2';
+data = readtable(fileName,'Sheet',sheetnames);
+% -------------------------------------------------------------------------
 
 % Given constants
+% === Gas Properties ===
 R = 8.314; % Universal gas constant, J/(mol·K)
-V = 0.0014; % Chamber volume, m^3
+R_bar = 0.08314; % Universal gas constant, L·bar/(mol·K)
 M_H2 = 2.016; % Molar mass of hydrogen, g/mol
+M_N2 = 28.014; % Molar mass of nitrogen, g/mol
 
-% Load data from Excel
-fileName = 'C:\Users\z5058464\OneDrive - UNSW\CH4DDI\Engine\MassflowRate\20251215_OldChamber_FlowRate.xlsx'; % Replace with the name of your Excel file
-sheetnames = 'H2_350_ST02_NonIdeal_B50_T2';
-data = readtable(fileName,'Sheet',sheetnames);
+% === Critical Properties ===
+% Hydrogen
+Pc_H2 = 1.29e6; % Critical pressure, Pa (1.29 MPa)
+Tc_H2 = 33.2; % Critical temperature, K
+omega_H2 = -0.22; % Acentric factor
+
+% Nitrogen
+Pc_N2 = 3.39e6; % Critical pressure, Pa (3.39 MPa)
+Tc_N2 = 126.2; % Critical temperature, K
+omega_N2 = 0.04; % Acentric factor
+
+% === SRK EOS Coefficients ===
+SRK_a_coeff = 0.42748; % SRK attraction parameter coefficient
+SRK_b_coeff = 0.08664; % SRK repulsion parameter coefficient
+SRK_m_c0 = 0.48; % SRK m parameter constant
+SRK_m_c1 = 1.574; % SRK m parameter linear coefficient
+SRK_m_c2 = 0.176; % SRK m parameter quadratic coefficient
+
+% === Chamber and Pressure ===
+V = 0.0014; % Chamber volume, m^3
+P_atm_bar = 1.01325; % Atmospheric pressure to convert gauge -> absolute, bar
+
+% === Conversion Factors ===
+bar_to_Pa = 1e5; % Conversion: bar to Pa
+bar_to_MPa = 0.1; % Conversion: bar to MPa
+MPa_to_Pa = 1e6; % Conversion: MPa to Pa
+m3_to_L = 1e3; % Conversion: m^3 to L
+mol_to_mg = 1000; % Conversion: mol to mg (when multiplied by molar mass)
+
+% === Numerical Tolerances ===
+iter_tol = 1e-5; % Tolerance for iterative convergence
+iter_max = 100; % Maximum iterations for convergence
+imag_tol = 1e-6; % Tolerance for imaginary part in root finding
+
+% -------------------------------------------------------------------------
 
 % Initialize results
 mass_H2_injected = zeros(height(data), 1); % Mass of hydrogen injected (mg)
 flowRate_H2 = zeros(height(data), 1); % Flow rate (mg/ms)
+% Ideal gas counterparts
+mass_H2_injected_ideal = zeros(height(data), 1); % Ideal-gas injected mass (mg)
+flowRate_H2_ideal = zeros(height(data), 1); % Ideal-gas flow rate (mg/ms)
+% (diagnostics removed)
 
 for i = 1:height(data)
     % Extract data for the current row
     T = data.InitialTemperature_K_T_1(i); % Temperature (K)
-    P_diff = data.PressureRiseDueToH2Injection_bar_P_diff(i)*1e5; % Pressure rise due to H2 injection
-    Pb = data.BackPressure_bar_P_b(i) * 1e5; % back pressure (Pa)
-    P_total = P_diff + Pb; % pressure after inejection
+    P_diff_bar = data.PressureRiseDueToH2Injection_bar_P_diff(i); % Pressure rise (gauge, bar)
+    Pb_gauge_bar = data.BackPressure_bar_P_b(i); % back pressure (gauge, bar)
+    P_total_gauge_bar = P_diff_bar + Pb_gauge_bar; % gauge pressure after injection (bar)
+
+    % Convert to absolute pressures for all thermodynamic calculations
+    Pb_abs_bar = Pb_gauge_bar + P_atm_bar;
+    P_total_abs_bar = P_total_gauge_bar + P_atm_bar;
     injection_duration = data.InjectorEnergisingTime_ms_(i); % Injection duration (ms)
     injection_count = data.InjectionQuantity(i);
     
-    % Critical properties for hydrogen
-    P_c_H2 = 1.315e6; % Critical pressure (Pa)
-    T_c_H2 = 33.19; % Critical temperature (K)
-    omega_H2 = -0.22; % Acentric factor
+    % === NON-IDEAL: Use SRK mixture Z calculation ===
+    Pc_MPa_vec = [Pc_H2, Pc_N2] / 1e6; % convert Pa to MPa for SRK
+    Tc_vec = [Tc_H2, Tc_N2];
+    omega_vec = [omega_H2, omega_N2];
+    [Z_mix, x_H2] = CLASS_SRK_EOS.CalculateBinaryMixtureZ(T, P_total_abs_bar, V, Pb_abs_bar, ...
+        Pc_MPa_vec, Tc_vec, omega_vec);
     
-    % Final moles in the chamber
-    Z = calculateZ(P_total, T, V, P_c_H2, T_c_H2, omega_H2); % Compressibility factor at P2
-    n = (P_diff * V) / (Z * R * T); % Final moles
+    % Total moles after injection
+    n_total = (P_total_abs_bar * bar_to_Pa * V) / (Z_mix * R * T);
+    
+    % Initial N2 moles (pure N2 at back pressure) using SRK
+    Z_N2 = CLASS_SRK_EOS.CalculateSingleComponentZ(Pb_abs_bar * bar_to_Pa, T, Pc_N2, Tc_N2, omega_N2);
+    n_N2 = (Pb_abs_bar * bar_to_Pa * V) / (Z_N2 * R * T);
+    
+    % H2 moles injected (guard against numerical negatives)
+    n_H2 = max(n_total - n_N2, 0);
     
     % Calculate injected hydrogen mass
-    mass_H2_injected(i) = (n * M_H2 * 1000)/injection_count; % Convert to mg
+    mass_H2_injected(i) = (n_H2 * M_H2 * mol_to_mg) / injection_count;
     
     % Calculate flow rate
-    flowRate_H2(i) = mass_H2_injected(i) / injection_duration; % Flow rate in mg/ms
+    flowRate_H2(i) = mass_H2_injected(i) / injection_duration;
+
+    % === IDEAL: Use ideal gas law (absolute pressures) ===
+    % Initial N2 moles (pure N2 at back pressure)
+    n_N2_ideal = (Pb_abs_bar * bar_to_Pa * V) / (R * T);
+    
+    % Total moles after injection (mixture ideal)
+    n_total_ideal = (P_total_abs_bar * bar_to_Pa * V) / (R * T);
+    
+    % Mole difference gives injected H2 directly under ideal assumption
+    n_H2_ideal = max(n_total_ideal - n_N2_ideal, 0);
+    
+    % Molar-difference path (source of truth)
+    mass_H2_injected_ideal(i) = (n_H2_ideal * M_H2 * mol_to_mg) / injection_count;
+    flowRate_H2_ideal(i) = mass_H2_injected_ideal(i) / injection_duration;
 end
 
 % Append results to the table and save
 data.Mass_H2_Injected_mg = mass_H2_injected;
 data.FlowRate_H2_mg_per_ms = flowRate_H2;
+% Append ideal-gas results for comparison
+data.Mass_H2_Injected_mg_Ideal = mass_H2_injected_ideal;
+data.FlowRate_H2_Ideal_mg_per_ms = flowRate_H2_ideal;
+% (diagnostics removed)
 
-% Calculate mean and standard deviation of flow rates for each injection duration
-unique_durations = unique(data.InjectorEnergisingTime_ms_); % Unique injection durations
-mean_flow_rate = zeros(length(unique_durations), 1); % Mean flow rates
-std_flow_rate = zeros(length(unique_durations), 1); % Standard deviations
+% Calculate statistics for both non-ideal and ideal results
+unique_durations = unique(data.InjectorEnergisingTime_ms_);
+n_durations = length(unique_durations);
 
-for i = 1:length(unique_durations)
-    % Get rows with the current injection duration
-    current_duration = unique_durations(i);
-    rows = data.InjectorEnergisingTime_ms_ == current_duration;
+% Pre-allocate arrays
+mean_flow_rate = zeros(n_durations, 1);
+std_injected_mass = zeros(n_durations, 1);
+mean_injected_mass = zeros(n_durations, 1);
+mean_flow_rate_ideal = zeros(n_durations, 1);
+std_injected_mass_ideal = zeros(n_durations, 1);
+mean_injected_mass_ideal = zeros(n_durations, 1);
+
+% Calculate statistics in single loop
+for i = 1:n_durations
+    rows = data.InjectorEnergisingTime_ms_ == unique_durations(i);
     
-    % Calculate mean and standard deviation for the current group
+    % Non-ideal statistics
     mean_flow_rate(i) = mean(flowRate_H2(rows));
-    std_injected_mass(i,1) = std(mass_H2_injected(rows));
-    mean_injected_mass(i,1) = mean(mass_H2_injected(rows)); % Calculate mean injected mass
+    std_injected_mass(i) = std(mass_H2_injected(rows));
+    mean_injected_mass(i) = mean(mass_H2_injected(rows));
+    
+    % Ideal statistics
+    mean_flow_rate_ideal(i) = mean(flowRate_H2_ideal(rows));
+    std_injected_mass_ideal(i) = std(mass_H2_injected_ideal(rows));
+    mean_injected_mass_ideal(i) = mean(mass_H2_injected_ideal(rows));
 end
 
 % Create summary table for mean and std results
 summary_table = table(unique_durations, mean_flow_rate, std_injected_mass, mean_injected_mass, ...
     'VariableNames', {'Injection_Duration_ms', 'Mean_FlowRate_mg_per_ms', 'Std_Injected_Mass_mg', 'Mean_Injected_Mass_mg'});
 
+% Ideal-gas summary table
+summary_table_ideal = table(unique_durations, mean_flow_rate_ideal, std_injected_mass_ideal, mean_injected_mass_ideal, ...
+    'VariableNames', {'Injection_Duration_ms', 'Mean_FlowRate_Ideal_mg_per_ms', 'Std_Injected_Mass_Ideal_mg', 'Mean_Injected_Mass_Ideal_mg'});
+
 % Create individual mass table for each injection
 injected_mass_table = table(data.InjectorEnergisingTime_ms_, mass_H2_injected, ...
     'VariableNames', {'Injection_Duration_ms', 'Injected_Mass_mg'});
 
-% Line of best fit
-% 1. When injection duration >= 1
-x1 = summary_table.Injection_Duration_ms;
-y1 = summary_table.Mean_Injected_Mass_mg;
-std1 = summary_table.Std_Injected_Mass_mg;
+% Ideal-gas individual mass table
+injected_mass_table_ideal = table(data.InjectorEnergisingTime_ms_, mass_H2_injected_ideal, ...
+    'VariableNames', {'Injection_Duration_ms', 'Injected_Mass_mg'});
 
-filtered_idx1 = x1 >= 0.6;
-x_filtered1 = x1(filtered_idx1);
-y_filtered1 = y1(filtered_idx1);
-std_filtered1 = std1(filtered_idx1);
-coefficients1 = polyfit(x_filtered1, y_filtered1, 1); % Linear fit (1st order polynomial)
-y_fit1 = polyval(coefficients1, x_filtered1); % Evaluate the fit
+% Linear regression (filter duration >= 0.6 ms)
+filtered_idx = summary_table.Injection_Duration_ms >= 0.6;
 
-SS_res1 = sum((y_filtered1 - y_fit1).^2); % Residual sum of squares
-SS_tot1 = sum((y_filtered1 - mean(y_filtered1)).^2); % Total sum of squares
+% Non-ideal fit
+x_filtered1 = summary_table.Injection_Duration_ms(filtered_idx);
+y_filtered1 = summary_table.Mean_Injected_Mass_mg(filtered_idx);
+std_filtered1 = summary_table.Std_Injected_Mass_mg(filtered_idx);
+coefficients1 = polyfit(x_filtered1, y_filtered1, 1);
+y_fit1 = polyval(coefficients1, x_filtered1);
+SS_res1 = sum((y_filtered1 - y_fit1).^2);
+SS_tot1 = sum((y_filtered1 - mean(y_filtered1)).^2);
 R_squared1 = 1 - (SS_res1 / SS_tot1);
-
 y_upper1 = y_fit1 + std_filtered1;
 y_lower1 = y_fit1 - std_filtered1;
+fitEqnNonIdeal = sprintf('Non-ideal: y = %.3fx + %.3f\nR^2 = %.4f', coefficients1(1), coefficients1(2), R_squared1)
 
-fitEqn = sprintf('y = %.3fx + %.3f\nR^2 = %.4f', coefficients1(1), coefficients1(2), R_squared1);
+% Ideal fit (same filter)
+x_filtered2 = summary_table_ideal.Injection_Duration_ms(filtered_idx);
+y_filtered2 = summary_table_ideal.Mean_Injected_Mass_Ideal_mg(filtered_idx);
+std_filtered2 = summary_table_ideal.Std_Injected_Mass_Ideal_mg(filtered_idx);
+coefficients2 = polyfit(x_filtered2, y_filtered2, 1);
+y_fit2 = polyval(coefficients2, x_filtered2);
+SS_res2 = sum((y_filtered2 - y_fit2).^2);
+SS_tot2 = sum((y_filtered2 - mean(y_filtered2)).^2);
+R_squared2 = 1 - (SS_res2 / SS_tot2);
+y_upper2 = y_fit2 + std_filtered2;
+y_lower2 = y_fit2 - std_filtered2;
+fitEqnIdeal = sprintf('Ideal: y = %.3fx + %.3f\nR^2 = %.4f', coefficients2(1), coefficients2(2), R_squared2)
 %% Plot
 % Create a new figure using custom axes class
 obj_ax = CLASS_AxesHandleStore;
@@ -102,51 +202,49 @@ obj_ax.MarginLeft = 45;
 obj_ax.MarginRight = 30;
 obj_ax.MarginBottom = 50;
 obj_ax.MarginTop = 30;
-obj_ax.AxesWidth = 500; % Example value, adjust as needed
-obj_ax.AxesHeight = 500; % Example value, adjust as needed
-obj_ax.RowNumber = 1;
+obj_ax.AxesWidth = 300;
+obj_ax.AxesHeight = 300;
+obj_ax.RowNumber = 2;
 obj_ax.ColumnNumber = 1;
-GapRow = ones(1, obj_ax.RowNumber) * 5;
-GapCol = ones(1,obj_ax.ColumnNumber) * 5;
+GapRow = ones(1, obj_ax.RowNumber) * 15;
+GapCol = ones(1, obj_ax.ColumnNumber) * 5;
 obj_ax.GapRow = GapRow;
 obj_ax.GapColumn = GapCol;
 obj_ax = obj_ax.ConstuctAxesUnevenGap();
-handle_ax = obj_ax.GetAxesHandleMatrix();
+ax_all = obj_ax.GetAxesHandleMatrix();
+ax_non = ax_all(1); % non-ideal plot
+ax_ideal = ax_all(2); % ideal plot
 
-hold(handle_ax,"on");
-fill(handle_ax,[x_filtered1; flipud(x_filtered1)], [y_upper1; flipud(y_lower1)], ...
-    [0.9, 0.9, 0.9], 'EdgeColor', 'none','FaceColor', '#d2edf9');
-plot(handle_ax,injected_mass_table.Injection_Duration_ms,injected_mass_table.Injected_Mass_mg,'o','MarkerFaceColor','#87BDDD','MarkerEdgeColor','none');
-plot(handle_ax,summary_table.Injection_Duration_ms,summary_table.Mean_Injected_Mass_mg,'o','MarkerFaceColor','#0C54A5','MarkerEdgeColor','none');
-plot(x_filtered1,y_fit1,'Color','#0C54A5','LineWidth',1.5);
-CLASS_Utilis.InsertFigureText(handle_ax,0.3,0.78,fitEqn);
-xticks([0.6 0.8 1 2 3 4 6 8 10]);
-yticks([0 2 4 6 8 10 12 14]);
-xlim([0.45,6.25])
-title(handle_ax, sheetnames,'Interpreter','none')
-xlabel('Energizing time [ms]')
-ylabel('Injected mass [mg]')
+% Non-ideal plot (top)
+hold(ax_non, "on");
+fill(ax_non, [x_filtered1; flipud(x_filtered1)], [y_upper1; flipud(y_lower1)], [0.82 0.93 0.98], 'EdgeColor', 'none');
+plot(ax_non, injected_mass_table.Injection_Duration_ms, injected_mass_table.Injected_Mass_mg, 'o', 'MarkerFaceColor', [0.53 0.74 0.87], 'MarkerEdgeColor', 'none');
+plot(ax_non, summary_table.Injection_Duration_ms, summary_table.Mean_Injected_Mass_mg, 'o', 'MarkerFaceColor', [0.05 0.33 0.65], 'MarkerEdgeColor', 'none');
+plot(ax_non, x_filtered1, y_fit1, 'Color', [0.05 0.33 0.65], 'LineWidth', 1.5);
+xticks(ax_non, [0.6 0.8 1 2 3 4 5 6 8 10]);
+xtickangle(ax_non, 45);
+xticklabels(ax_non, {});
+yticks(ax_non, [0 2 4 6 8 10 12 14]);
+xlim(ax_non, [0.45, 6.25]);
+ylim(ax_non, [0, 12]);
+CLASS_Utilis.InsertFigureText(ax_non, 0.3, 0.78, fitEqnNonIdeal);
+title(ax_non, sheetnames, 'Interpreter', 'none');
 
-%% Function
-% Input
-% Pressure (Pa), Temp (K), volume (m^3), Critical pressure (Pa), Critical Temp
-% (k), Acentric factor
-function Z = calculateZ(P, T, V, P_c, T_c, omega)
-    % Peng-Robinson parameters
-    R = 8.314; % Universal gas constant, J/(mol·K)
-    Tr = T / T_c; % Reduced temperature
-    Pr = P / P_c; % Reduced pressure
-    a = 0.45724 * (R^2 * T_c^2) / P_c; % Attraction parameter
-    b = 0.07780 * (R * T_c) / P_c; % Repulsion parameter
-    alpha = (1 + (0.480 + 1.574 * omega - 0.176 * omega^2) * (1 - sqrt(Tr)))^2; % Temperature-dependent factor
-    A = (a * alpha * P) / (R^2 * T^2); % Dimensionless A
-    B = (b * P) / (R * T); % Dimensionless B
-    
-    % Cubic equation coefficients
-     coeffs = [1, -(1 - B), A - 2 * B - 3 * B^2, -(A * B - B^2 - B^3)]; % PR EOS
-%     coeffs = [1, -(1 - B), A - B - B^2, -A * B]; % SRK EOS
+% Ideal plot (bottom)
+hold(ax_ideal, "on");
+fill(ax_ideal, [x_filtered2; flipud(x_filtered2)], [y_upper2; flipud(y_lower2)], [0.97 0.89 0.82], 'EdgeColor', 'none');
+plot(ax_ideal, injected_mass_table_ideal.Injection_Duration_ms, injected_mass_table_ideal.Injected_Mass_mg, 'o', 'MarkerFaceColor', [0.96 0.69 0.25], 'MarkerEdgeColor', 'none');
+plot(ax_ideal, summary_table_ideal.Injection_Duration_ms, summary_table_ideal.Mean_Injected_Mass_Ideal_mg, 'o', 'MarkerFaceColor', [0.83 0.33 0], 'MarkerEdgeColor', 'none');
+plot(ax_ideal, x_filtered2, y_fit2, 'Color', [0.83 0.33 0], 'LineWidth', 1.5);
+xticks(ax_ideal, [0.6 0.8 1 2 3 4 5 6 8 10]);
+xtickangle(ax_ideal, 45);
+yticks(ax_ideal, [0 2 4 6 8 10 12 14]);
+xlim(ax_ideal, [0.45, 6.25]);
+ylim(ax_ideal, [0, 12]);
+CLASS_Utilis.InsertFigureText(ax_ideal, 0.3, 0.78, fitEqnIdeal);
+xlabel(ax_ideal, 'Energizing time [ms]');
+ylabel(ax_ideal, 'Injected mass [mg]');
 
-    % Solve cubic equation for Z
-    roots_Z = roots(coeffs);
-    Z = max(real(roots_Z)); % Select the largest real root
-end
+%% SRK calculations now handled by CLASS_SRK_EOS
+% No inline functions needed - see Library_Matlab/CLASS_SRK_EOS.m
+
