@@ -10,7 +10,7 @@ addpath('Library_Matlab');
 % -----------------------------------------
 % Load data from Excel
 fileName = 'C:\Users\jun-y\OneDrive - UNSW\CH4DDI\Engine\MassflowRate\20251215_OldChamber_FlowRate.xlsx'; % Replace with the name of your Excel file
-sheetnames = 'H2_350_ST02_NonIdeal_B0_T2';
+sheetnames = 'H2_350_ST02_NonIdeal_B50_T2';
 data = readtable(fileName,'Sheet',sheetnames);
 % -------------------------------------------------------------------------
 
@@ -20,6 +20,7 @@ R = 8.314; % Universal gas constant, J/(mol·K)
 R_bar = 0.08314; % Universal gas constant, L·bar/(mol·K)
 M_H2 = 2.016; % Molar mass of hydrogen, g/mol
 M_N2 = 28.014; % Molar mass of nitrogen, g/mol
+LHV = 120.0; % Lower heating value of hydrogen, MJ/kg
 
 % === Critical Properties ===
 % Hydrogen
@@ -27,7 +28,6 @@ Pc_H2 = 1.29e6; % Critical pressure, Pa (1.29 MPa)
 Tc_H2 = 33.2; % Critical temperature, K
 omega_H2 = -0.22; % Acentric factor
 
-% Nitrogen
 Pc_N2 = 3.39e6; % Critical pressure, Pa (3.39 MPa)
 Tc_N2 = 126.2; % Critical temperature, K
 omega_N2 = 0.04; % Acentric factor
@@ -321,93 +321,39 @@ y_upper3 = y_fit3 + std_filtered3;
 y_lower3 = y_fit3 - std_filtered3;
 fitEqnIdeal_FromInitAvg = sprintf('Ideal (from-initial avg): y = %.3fx + %.3f\nR^2 = %.4f', coefficients3(1), coefficients3(2), R_squared3)
 
-%% Cross-check: block-wise vs cumulative-from-initial (ideal gas)
-% We compare per-block moles computed two ways:
-%   Method A (block-wise): n_H2_ideal_vec (current) = (P_after - P_before) V / (R T)
-%   Method B (from-initial): N_k = (P_k/T_k - P_0/T_0) V/R; per-block = N_k - N_{k-1}
-% Groups are split by energizing time to avoid mixing separate sequences.
+% --- Convert mass-vs-time fits (mg vs ms) to energy-vs-time (J vs us)
+% Using: mass_mg = m * t_ms + c  ->  Energy_J = mass_mg * LHV_MJ_per_kg
+% With t_us input: t_ms = t_us * 1e-3 -> Energy_J = (m*1e-3)*t_us*LHV + c*LHV
 
-% Pre-allocate outputs
-data.nH2_Ideal_Blockwise = n_H2_ideal_vec;
-data.nH2_Ideal_FromInitial = NaN(height(data),1);
-data.nH2_Ideal_Diff = NaN(height(data),1);
-data.nH2_Ideal_DiffRel = NaN(height(data),1);
+% Define total energy for conversion
+E_total_J = 1400; % Total energy target [J]
 
-durations = data.InjectorEnergisingTime_ms_;
-uDur = unique(durations);
-for ui = 1:numel(uDur)
-    rows = find(durations == uDur(ui));
-    % sort rows by cumulative InjectionQuantity (e.g., 0,20,40,...)
-    [~, ord] = sort(data.InjectionQuantity_Cum(rows));
-    rows = rows(ord);
-    % baseline (assumed first in sequence)
-    r0 = rows(1);
-    P0_abs = Pb_abs_bar_vec(r0); % initial absolute back pressure
-    T0 = T_vec(r0);
-    % cumulative from initial for each row
-    S = (P_total_abs_bar_vec(rows) * bar_to_Pa * V) ./ (R * T_vec(rows));
-    S0 = (P0_abs * bar_to_Pa * V) / (R * T0);
-    N_cum = S - S0;
-    % per-block from cumulative: diff with previous row in group
-    n_from_initial = NaN(size(rows));
-    for k = 2:numel(rows)
-        n_from_initial(k) = N_cum(k) - N_cum(k-1);
-    end
-    % write back
-    data.nH2_Ideal_FromInitial(rows) = n_from_initial;
-    % differences where both are defined
-    idx_valid = rows(2:end);
-    diff_loc = n_from_initial(2:end) - n_H2_ideal_vec(idx_valid);
-    data.nH2_Ideal_Diff(idx_valid) = diff_loc;
-    data.nH2_Ideal_DiffRel(idx_valid) = diff_loc ./ max(1e-12, n_H2_ideal_vec(idx_valid));
-end
+% Non-ideal (from-initial fit coefficients: coefficients1c)
+m_non = coefficients1c(1); c_non = coefficients1c(2); % m [mg/ms], c [mg]
+% Use CLASS to get energy linear coefficients and T100 (accounts for c)
+[slope_non_J_per_us, intercept_non_J, t100_non_us] = CLASS_InjectionEnergy.GetEnergyLinearCoefficients(E_total_J, LHV, 0, m_non, c_non);
+fprintf('Non-ideal energy fit (CLASS): E(us) = %.6g * t_us + %.6g [J]\n', slope_non_J_per_us, intercept_non_J);
+CA_t100_non = CLASS_InjectionEnergy.GetCrankAngle(t100_non_us);
+fprintf('Non-ideal: T100 = %.1f us (%.4f ms), CA = %.3f deg\n', t100_non_us, t100_non_us*1e-3, CA_t100_non);
 
-% Report cross-check statistics
-valid = ~isnan(data.nH2_Ideal_Diff);
-if any(valid)
-    absDiff = abs(data.nH2_Ideal_Diff(valid));
-    maxAbs = max(absDiff);
-    meanAbs = mean(absDiff);
-    absDiffSorted = sort(absDiff);
-    p95Idx = max(1, round(0.95 * numel(absDiffSorted)));
-    p95Abs = absDiffSorted(p95Idx);
-    maxRel = max(abs(data.nH2_Ideal_DiffRel(valid)));
-    fprintf('Cross-check (ideal): maxAbs=%.3e mol, meanAbs=%.3e mol, p95Abs=%.3e mol, maxRel=%.3e (N=%d)\n',...
-        maxAbs, meanAbs, p95Abs, maxRel, numel(absDiff));
-end
+% Ideal (from-initial fit coefficients: coefficients3)
+m_id = coefficients3(1); c_id = coefficients3(2);
+[slope_id_J_per_us, intercept_id_J, t100_id_us] = CLASS_InjectionEnergy.GetEnergyLinearCoefficients(E_total_J, LHV, 0, m_id, c_id);
+fprintf('Ideal energy fit (CLASS): E(us) = %.6g * t_us + %.6g [J]\n', slope_id_J_per_us, intercept_id_J);
+CA_t100_id = CLASS_InjectionEnergy.GetCrankAngle(t100_id_us);
+fprintf('Ideal: T100 = %.1f us (%.4f ms), CA = %.3f deg\n', t100_id_us, t100_id_us*1e-3, CA_t100_id);
 
-%% Cross-check 2a: per-injection from-initial avg vs block-wise (non-ideal SRK)
-% Method C (from-initial avg): m_per_inj(k) = [ n_total(k) - n_N2(base) ] * M_H2 / InjQty_cum_k
-% Method A (block-wise): existing mass_H2_injected (per-injection within block)
+% Build and display percent tables using CLASS_InjectionEnergy (0:10:100%)
+step_pct = 10;
+% For linear mass-vs-time fits mass = m*t_ms + c, the instantaneous mass-rate is constant -> a=0, b=m
+tbl_non = CLASS_InjectionEnergy.GetPercentTable(E_total_J, LHV, 0, m_non, c_non, step_pct);
+disp('Non-ideal energy percent table (0:10:100%):');
+disp(tbl_non);
 
-valid2_non = ~isnan(data.mH2_NonIdeal_PerInj_FromInitial) & ~isnan(data.mH2_NonIdeal_PerInj_Blockwise);
-if any(valid2_non)
-    d2n = data.mH2_NonIdeal_PerInj_FromInitial(valid2_non) - data.mH2_NonIdeal_PerInj_Blockwise(valid2_non);
-    maxAbs2n = max(abs(d2n));
-    meanAbs2n = mean(abs(d2n));
-    d2ns = sort(abs(d2n));
-    p95Abs2n = d2ns(max(1, round(0.95*numel(d2ns))));
-    maxRel2n = max(abs(d2n) ./ max(1e-12, data.mH2_NonIdeal_PerInj_Blockwise(valid2_non)));
-    fprintf('Cross-check (non-ideal per-inj avg vs block): maxAbs=%.3e mg, meanAbs=%.3e mg, p95Abs=%.3e mg, maxRel=%.3e (N=%d)\n',...
-        maxAbs2n, meanAbs2n, p95Abs2n, maxRel2n, numel(d2n));
-end
+tbl_id = CLASS_InjectionEnergy.GetPercentTable(E_total_J, LHV, 0, m_id, c_id, step_pct);
+disp('Ideal energy percent table (0:10:100%):');
+disp(tbl_id);
 
-%% Cross-check 2: per-injection from-initial avg vs block-wise (ideal gas)
-% Method C (from-initial avg): m_per_inj(k) = [ (P_k/T_k - P_0/T_0) V/R ] * M_H2 / InjQty_k
-% Method A (block-wise): existing mass_H2_injected_ideal (per-injection within block)
-
-% Differences vs block-wise per-injection
-valid2 = ~isnan(data.mH2_Ideal_PerInj_FromInitial) & ~isnan(data.mH2_Ideal_PerInj_Blockwise);
-if any(valid2)
-    d2 = data.mH2_Ideal_PerInj_FromInitial(valid2) - data.mH2_Ideal_PerInj_Blockwise(valid2);
-    maxAbs2 = max(abs(d2));
-    meanAbs2 = mean(abs(d2));
-    d2s = sort(abs(d2));
-    p95Abs2 = d2s(max(1, round(0.95*numel(d2s))));
-    maxRel2 = max(abs(d2) ./ max(1e-12, data.mH2_Ideal_PerInj_Blockwise(valid2)));
-    fprintf('Cross-check (per-inj avg vs block): maxAbs=%.3e mg, meanAbs=%.3e mg, p95Abs=%.3e mg, maxRel=%.3e (N=%d)\n',...
-        maxAbs2, meanAbs2, p95Abs2, maxRel2, numel(d2));
-end
 %% Plot
 % Create a new figure using custom axes class
 obj_ax = CLASS_AxesHandleStore;
@@ -458,7 +404,7 @@ CLASS_Utilis.InsertFigureText(ax_ideal, 0.3, 0.78, fitEqnIdeal);
 xlabel(ax_ideal, 'Energizing time [ms]');
 ylabel(ax_ideal, 'Injected mass [mg]');
 
-% From-initial average plot (duplicate layout)
+%% From-initial average plot (duplicate layout)
 obj_ax2 = CLASS_AxesHandleStore;
 obj_ax2.MarginLeft = 45;
 obj_ax2.MarginRight = 30;
@@ -506,6 +452,161 @@ ylim(ax_ideal_c, [0, 12]);
 CLASS_Utilis.InsertFigureText(ax_ideal_c, 0.05, 0.85, fitEqnIdeal_FromInitAvg);
 xlabel(ax_ideal_c, 'Energizing time [ms]');
 ylabel(ax_ideal_c, 'Injected mass (from-initial avg) [mg]');
+
+%% Combined energy plots: 2x2 (non-ideal top, ideal bottom)
+% Plot energy [J] vs injection duration [us] and vs crank-angle [deg]
+obj_ax3 = CLASS_AxesHandleStore;
+obj_ax3.MarginLeft = 65;
+obj_ax3.MarginRight = 40;
+obj_ax3.MarginBottom = 70;
+obj_ax3.MarginTop = 40;
+obj_ax3.AxesWidth = 400;
+obj_ax3.AxesHeight = 400;
+obj_ax3.RowNumber = 2;
+obj_ax3.ColumnNumber = 2;
+GapRow3 = ones(1, obj_ax3.RowNumber) * 80;
+GapCol3 = ones(1, obj_ax3.ColumnNumber) * 100;
+obj_ax3.GapRow = GapRow3;
+obj_ax3.GapColumn = GapCol3;
+obj_ax3 = obj_ax3.ConstuctAxesUnevenGap();
+ax_all3 = obj_ax3.GetAxesHandleMatrix();
+
+ax_n_dur = ax_all3(1,1); % non-ideal energy vs duration
+ax_n_ca  = ax_all3(1,2); % non-ideal energy vs CA
+ax_i_dur = ax_all3(2,1); % ideal energy vs duration
+ax_i_ca  = ax_all3(2,2); % ideal energy vs CA
+
+% Prepare conversion
+LHV_MJkg = LHV; % [MJ/kg]
+
+% Non-ideal data (from-initial averages)
+x_non_ms = summary_table_nonideal_fromInit.Injection_Duration_ms(filtered_idx);
+y_non_mg = summary_table_nonideal_fromInit.Mean_Injected_Mass_NonIdeal_FromInit_mg(filtered_idx);
+E_non_J = y_non_mg * LHV_MJkg; % mass_mg * LHV_MJkg -> J
+% individual points
+x_non_pts_ms = injected_mass_table_nonideal_fromInit.Injection_Duration_ms;
+y_non_pts_mg = injected_mass_table_nonideal_fromInit.Injected_Mass_FromInit_mg;
+E_non_pts_J = y_non_pts_mg * LHV_MJkg;
+
+% Energy fit (use CLASS coefficients slope_non_J_per_us, intercept_non_J)
+% Prepare percent levels and compute all markers first
+pct_levels_high = 9.5:9.5:95;
+E_levels = (pct_levels_high./100) * E_total_J;
+t_us_levels = (E_levels - intercept_non_J) ./ slope_non_J_per_us;
+t_us_levels = max(t_us_levels, 0);
+%t_us_levels = 8000;
+
+% Plot non-ideal duration (top-left): straight line + highlighted percent points
+hold(ax_n_dur, 'on');
+x_line_min = min(t_us_levels) * 0.95;
+x_line_max = t_us_levels(end);
+t_us_fit_trimmed = linspace(x_line_min, x_line_max, 100);
+Efit_non_trimmed = slope_non_J_per_us .* t_us_fit_trimmed + intercept_non_J;
+plot(ax_n_dur, t_us_fit_trimmed, Efit_non_trimmed, 'Color', [0.05 0.33 0.65], 'LineWidth', 1.8);
+x_marker_color = [0.7 0.85 0.95];
+x_marker_color2 = [0.96 0.69 0.25];
+plot(ax_n_dur, t_us_levels, E_levels, 's', 'MarkerFaceColor', x_marker_color, 'MarkerEdgeColor', 'k', 'MarkerSize', 10, 'LineWidth', 1.5);
+% label markers with percent and coordinates
+y_offset_up = 50;   % J above marker
+y_offset_down = 80; % J below marker
+for k=1:numel(pct_levels_high)
+    txt = sprintf('%.1f%%', pct_levels_high(k));
+    text(ax_n_dur, t_us_levels(k), E_levels(k)+y_offset_up, txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+    coord_txt = sprintf('%.0f us\n%.0f J', t_us_levels(k), E_levels(k));
+    text(ax_n_dur, t_us_levels(k), E_levels(k)-y_offset_down, coord_txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+end
+eqn_non = sprintf('E(us) = %.3g * t + %.3g J, %.0f J', slope_non_J_per_us, intercept_non_J, E_total_J);
+equtext = CLASS_Utilis.InsertFigureText(ax_n_dur, 0.1, 0.85, eqn_non);
+set(equtext, 'fontweight', 'bold');
+xlim(ax_n_dur, [0, 8500]);
+ylim(ax_n_dur, [0, E_total_J*1.05]);
+xlabel(ax_n_dur, 'Energizing time [us]');
+ylabel(ax_n_dur, 'Energy [J]');
+title(ax_n_dur, [sheetnames ' Non-ideal: Energy vs Duration'], 'Interpreter', 'none');
+
+% Non-ideal CA plot (top-right): straight line + highlighted percent points
+t_fit_CA = CLASS_InjectionEnergy.GetCrankAngle(t_us_fit_trimmed);
+CA_levels = CLASS_InjectionEnergy.GetCrankAngle(t_us_levels);
+hold(ax_n_ca, 'on');
+plot(ax_n_ca, t_fit_CA, Efit_non_trimmed, 'Color', [0.05 0.33 0.65], 'LineWidth', 1.8);
+plot(ax_n_ca, CA_levels, E_levels, 's', 'MarkerFaceColor', x_marker_color, 'MarkerEdgeColor', 'k', 'MarkerSize', 10, 'LineWidth', 1.5);
+% label markers with percent and coordinates
+for k=1:numel(pct_levels_high)
+    txt = sprintf('%.1f%%', pct_levels_high(k));
+    text(ax_n_ca, CA_levels(k), E_levels(k)+y_offset_up, txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+    coord_txt = sprintf('%.2f%c\n%.0f J', CA_levels(k), char(176), E_levels(k));
+    text(ax_n_ca, CA_levels(k), E_levels(k)-y_offset_down, coord_txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+end
+eqn_non_ca = sprintf('E(CA) = %.3g * CA + %.3g J, %.0f J', slope_non_J_per_us*(1400/60*2), intercept_non_J, E_total_J);
+equtext_ca = CLASS_Utilis.InsertFigureText(ax_n_ca, 0.1, 0.85, eqn_non_ca);
+set(equtext_ca, 'fontweight', 'bold');
+xlim(ax_n_ca, [0, 70]);
+ylim(ax_n_ca, [0, E_total_J*1.05]);
+xlabel(ax_n_ca, 'Crank Angle [deg]');
+ylabel(ax_n_ca, 'Energy [J]');
+title(ax_n_ca, [sheetnames ' Non-ideal: Energy vs CA'], 'Interpreter', 'none');
+
+% Ideal data (from-initial averages)
+x_id_ms = summary_table_ideal_fromInit.Injection_Duration_ms(filtered_idx);
+y_id_mg = summary_table_ideal_fromInit.Mean_Injected_Mass_Ideal_FromInit_mg(filtered_idx);
+E_id_J = y_id_mg * LHV_MJkg;
+x_id_pts_ms = injected_mass_table_ideal_fromInit.Injection_Duration_ms;
+y_id_pts_mg = injected_mass_table_ideal_fromInit.Injected_Mass_FromInit_mg;
+E_id_pts_J = y_id_pts_mg * LHV_MJkg;
+
+xfit_ms_id = linspace(min(x_id_ms), max(x_id_ms), 200);
+t_us_fit_id = xfit_ms_id * 1e3;
+
+% Compute ideal percent levels and markers
+E_levels_id = (pct_levels_high./100) * 1400;
+t_us_levels_id = (E_levels_id - intercept_id_J) ./ slope_id_J_per_us;
+t_us_levels_id = max(t_us_levels_id, 0);
+
+% Ideal duration plot (bottom-left): straight line + highlighted percent points
+hold(ax_i_dur, 'on');
+x_line_min_id = min(t_us_levels_id) * 0.95;
+x_line_max_id = t_us_levels_id(end);
+t_us_fit_id_trimmed = linspace(x_line_min_id, x_line_max_id, 100);
+Efit_id_trimmed = slope_id_J_per_us .* t_us_fit_id_trimmed + intercept_id_J;
+plot(ax_i_dur, t_us_fit_id_trimmed, Efit_id_trimmed, 'Color', [0.83 0.33 0], 'LineWidth', 1.8);
+plot(ax_i_dur, t_us_levels_id, E_levels_id, 's', 'MarkerFaceColor', x_marker_color2, 'MarkerEdgeColor', 'k', 'MarkerSize', 10, 'LineWidth', 1.5);
+for k=1:numel(pct_levels_high)
+    txt = sprintf('%.1f%%', pct_levels_high(k));
+    text(ax_i_dur, t_us_levels_id(k), E_levels_id(k)+y_offset_up, txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+    coord_txt = sprintf('%.0f us\n%.0f J', t_us_levels_id(k), E_levels_id(k));
+    text(ax_i_dur, t_us_levels_id(k), E_levels_id(k)-y_offset_down, coord_txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+end
+eqn_id = sprintf('E(us) = %.3g * t + %.3g J, %.0f J', slope_id_J_per_us, intercept_id_J, E_total_J);
+equtext_id = CLASS_Utilis.InsertFigureText(ax_i_dur, 0.1, 0.85, eqn_id);
+set(equtext_id, 'fontweight', 'bold');
+xlim(ax_i_dur, [0, 8500]);
+ylim(ax_i_dur, [0, E_total_J*1.05]);
+xlabel(ax_i_dur, 'Energizing time [us]');
+ylabel(ax_i_dur, 'Energy [J]');
+title(ax_i_dur, [sheetnames ' Ideal: Energy vs Duration'], 'Interpreter', 'none');
+
+% Ideal CA plot (bottom-right): straight line + highlighted percent points
+t_fit_CA_id = CLASS_InjectionEnergy.GetCrankAngle(t_us_fit_id_trimmed);
+CA_levels_id = CLASS_InjectionEnergy.GetCrankAngle(t_us_levels_id);
+hold(ax_i_ca, 'on');
+plot(ax_i_ca, t_fit_CA_id, Efit_id_trimmed, 'Color', [0.83 0.33 0], 'LineWidth', 1.8);
+plot(ax_i_ca, CA_levels_id, E_levels_id, 's', 'MarkerFaceColor', x_marker_color2, 'MarkerEdgeColor', 'k', 'MarkerSize', 10, 'LineWidth', 1.5);
+for k=1:numel(pct_levels_high)
+    txt = sprintf('%.1f%%', pct_levels_high(k));
+    text(ax_i_ca, CA_levels_id(k), E_levels_id(k)+y_offset_up, txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+    coord_txt = sprintf('%.2f%c\n%.0f J', CA_levels_id(k), char(176), E_levels_id(k));
+    text(ax_i_ca, CA_levels_id(k), E_levels_id(k)-y_offset_down, coord_txt, 'HorizontalAlignment','center','FontSize',8,'FontWeight','bold');
+end
+eqn_id_ca = sprintf('E(CA) = %.3g * CA + %.3g J, %.0f J', slope_id_J_per_us*(1400/60*2), intercept_id_J, E_total_J);
+equtext_id_ca = CLASS_Utilis.InsertFigureText(ax_i_ca, 0.1, 0.85, eqn_id_ca);
+set(equtext_id_ca, 'fontweight', 'bold');
+xlim(ax_i_ca, [0, 70]);
+ylim(ax_i_ca, [0, E_total_J*1.05]);
+xlabel(ax_i_ca, 'Crank Angle [deg]');
+ylabel(ax_i_ca, 'Energy [J]');
+title(ax_i_ca, [sheetnames ' Ideal: Energy vs CA'], 'Interpreter', 'none');
+
+%% plot 
 
 %% SRK calculations now handled by CLASS_SRK_EOS
 % No inline functions needed - see Library_Matlab/CLASS_SRK_EOS.m

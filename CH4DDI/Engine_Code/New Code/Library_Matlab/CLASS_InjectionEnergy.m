@@ -1,144 +1,265 @@
-% filepath: g:\Fork\PerformanceEngine\PerformanceEngine\Library_Matlab\CLASS_EnergyLinearMap.m
 classdef CLASS_InjectionEnergy
-    % Maps fuel injection rate to cumulative energy input over injection duration.
+    % CLASS_InjectionEnergy (static methods only)
+    % Utilities to map a linear injection-rate model (cumulative mass: M(t) = 0.5*a*t^2 + b*t + c)
+    % to cumulative energy and percent-of-total energy, with crank angle conversion.
     %
-    % Purpose:
-    %   Given total energy required, fuel lower heating value (LHV), and a linear
-    %   injection rate model (mass_rate = a*t + b), compute a new linear function
-    %   that relates injection time to cumulative energy as a percentage of total.
+    % Conventions / units expected:
+    %  - a: acceleration coefficient of cumulative mass [mg/ms^2]
+    %  - b: velocity coefficient of cumulative mass [mg/ms]
+    %  - c: initial cumulative mass offset [mg] (optional, default 0)
+    %  - t: time in [us] (microseconds) for public APIs; internally converted to [ms]
+    %  - LHV_fuel_MJ_kg: lower heating value in [MJ/kg]
+    %  - E_total_J: total target energy in [J]
+    %  - rpm: engine speed in [RPM] (default 1400)
     %
-    % Usage Example:
-    %   % Define injection rate: mass_rate(t) = 5*t + 10 [mg/ms]
-    %   mapper = CLASS_EnergyLinearMap(100, 43.5, 5, 10);
-    %   % Returns linear fit: energy_pct(t) = slope*t + intercept
-    %   [slope, intercept, t_100pct] = mapper.GetEnergyLinearFunction();
+    % Public static methods:
+    %  - GetEnergyLinearFunction(E_total_J, LHV_MJ_kg, a, b, c)
+    %      -> [slope_pct_per_us, intercept_pct, t_100pct_us]
+    %      Returns linear approximation of energy percent vs time (us)
     %
-    % Properties (constant, no external modification needed):
-    %   E_total_J       - Total energy required [J]
-    %   LHV_fuel_MJ_kg  - Fuel lower heating value [MJ/kg]
-    %   a_rate          - Slope of injection rate [mg/ms²]
-    %   b_rate          - Intercept of injection rate [mg/ms]
+    %  - GetEnergyLinearCoefficients(E_total_J, LHV_MJ_kg, a, b, c)
+    %      -> [slope_J_per_us, intercept_J, t_100pct_us]
+    %      Returns linear coefficients for Energy [J] vs time [us]
     %
-    % Methods:
-    %   GetEnergyLinearFunction - Returns linear fit slope, intercept, and time to 100%
-    %   GetCumulativeEnergy     - Query cumulative energy at any time t
-    %   GetEnergyPercent        - Query energy percentage (0–100%) at time t
+    %  - GetCumulativeEnergy(t_us, LHV_MJ_kg, a, b, c)
+    %      -> E_cum_J (vectorized)
+    %      Computes cumulative energy at specified time(s)
     %
-    % Notes:
-    %   - Injection rate units: mg/ms → convert to kg/s for LHV energy calculation
-    %   - Cumulative energy is quadratic in time; linear fit is best-fit approximation
-    %   - Time to reach 100% energy is solved implicitly from total mass requirement
-    
-    properties (Constant)
-        % Physical constants (no modification)
-    end
-    
-    properties
-        E_total_J       % Total energy required [J]
-        LHV_fuel_MJ_kg  % Fuel lower heating value [MJ/kg] (e.g., 43.5 for diesel)
-        a_rate          % Slope: dm/dt = a*t + b [mg/ms²]
-        b_rate          % Intercept [mg/ms]
-    end
-    
-    methods
-        function obj = CLASS_EnergyLinearMap(E_total_J, LHV_fuel_MJ_kg, a_rate, b_rate)
-            % Constructor: Initialize energy mapper with injection parameters.
+    %  - GetEnergyPercent(t_us, E_total_J, LHV_MJ_kg, a, b, c)
+    %      -> percent [0..100] (vectorized)
+    %      Computes percent of total energy reached at specified time(s)
+    %
+    %  - GetCrankAngle(t_us, rpm)
+    %      -> CA_deg (vectorized)
+    %      Converts time [us] to crank angle [degrees] at given RPM
+    %
+    %  - GetPercentTable(E_total_J, LHV_MJ_kg, a, b, c, step_percent, rpm)
+    %      -> table with columns: Pct, Energy_J, Time_us, Time_ms, CA_deg
+    %      Generates table of energy milestones at regular percent intervals
+
+    methods (Static)
+        function [slope, intercept, t_100pct_us] = GetEnergyLinearFunction(E_total_J, LHV_fuel_MJ_kg, a, b, c)
+            % Compute a simple linear approximation of cumulative energy percent vs time.
+            %
+            % Inputs (scalars):
+            %  E_total_J        - total energy target [J], must be > 0
+            %  LHV_fuel_MJ_kg   - fuel LHV [MJ/kg], must be > 0
+            %  a                - slope of mass rate [mg/ms^2]
+            %  b                - intercept of mass rate [mg/ms]
+            %
+            % Outputs:
+            %  slope            - percent-per-us (linear fit on microsecond axis)
+            %  intercept        - percent at t=0
+            %  t_100pct_us      - time [us] at which cumulative energy reaches 100%
+
+            % Provide default total energy if not supplied
+            if nargin < 1 || isempty(E_total_J)
+                E_total_J = 1400; % default total energy [J]
+            end
+
+            % Input validation
+            validateattributes(E_total_J, {'numeric'}, {'scalar','real','positive'}, mfilename, 'E_total_J');
+            validateattributes(LHV_fuel_MJ_kg, {'numeric'}, {'scalar','real','positive'}, mfilename, 'LHV_fuel_MJ_kg');
+            validateattributes(a, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'a');
+            validateattributes(b, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'b');
+            if nargin < 5 || isempty(c)
+                c = 0; % initial cumulative mass at t=0 [mg]
+            end
+            validateattributes(c, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'c');
+
+            % Convert total energy to total mass required, expressed in mg.
+            % Derivation: mass_kg = E_total_J / (LHV_J_per_kg), LHV_J_per_kg = LHV_MJ_kg * 1e6
+            % mass_mg = mass_kg * 1e6 -> mass_mg = E_total_J / LHV_MJ_kg
+            M_total_mg = E_total_J / LHV_fuel_MJ_kg; % [mg]
+
+            % Solve 0.5*a*t^2 + b*t + c = M_total_mg for t >= 0
+            if abs(a) < 1e-15
+                % effectively linear mass rate: b*t = M_total_mg
+                if abs(b) < 1e-15
+                    error('CLASS_InjectionEnergy:ZeroRate','Both a and b are zero; injection rate is zero.');
+                end
+                t_100pct = (M_total_mg - c) / b;
+            else
+                A = 0.5 * a;
+                B = b;
+                C = c - M_total_mg;
+                disc = B.^2 - 4*A.*C;
+                if disc < 0
+                    error('CLASS_InjectionEnergy:InsufficientRate','Negative discriminant: injection parameters cannot reach required mass.');
+                end
+                t1 = (-B + sqrt(disc)) / (2*A);
+                t2 = (-B - sqrt(disc)) / (2*A);
+                t_100pct = max(t1, t2);
+                if t_100pct < 0
+                    error('CLASS_InjectionEnergy:NegativeTime','Computed positive root is negative; check parameters.');
+                end
+            end
+
+            % Return time in microseconds; internal calculation used ms.
+            t_100pct_us = t_100pct * 1e3; % ms -> us
+
+            % Sample percent at three points (times in us) and fit linear model
+            t_samples = [0, 0.5*t_100pct_us, t_100pct_us];
+            E_pct_samples = CLASS_InjectionEnergy.GetEnergyPercent(t_samples, E_total_J, LHV_fuel_MJ_kg, a, b, c);
+
+            p = polyfit(t_samples(:), E_pct_samples(:), 1);
+            slope = p(1);    % percent per us
+            intercept = p(2);
+
+            % Numerical guard: clamp very small negative intercepts to zero
+            if intercept < 0 && intercept > -1e-9
+                intercept = 0;
+            end
+        end
+
+        function [slope_J_per_us, intercept_J, t_100pct_us] = GetEnergyLinearCoefficients(E_total_J, LHV_fuel_MJ_kg, a, b, c)
+            % Return linear coefficients for Energy (J) vs time (us) using
+            % the internal percent-based linearization.
+            if nargin < 5 || isempty(c)
+                c = 0;
+            end
+            [slope_pct_per_us, intercept_pct, t_100pct_us] = CLASS_InjectionEnergy.GetEnergyLinearFunction(E_total_J, LHV_fuel_MJ_kg, a, b, c);
+            % Convert percent-per-us to J per us
+            slope_J_per_us = (slope_pct_per_us ./ 100) .* E_total_J;
+            intercept_J = (intercept_pct ./ 100) .* E_total_J;
+        end
+
+        function E_cum_J = GetCumulativeEnergy(t_us, LHV_fuel_MJ_kg, a, b, c)
+            % Vectorized cumulative energy in Joules for times t (microseconds).
+            %
+            % t_us can be scalar or vector. Returns same-shaped E_cum_J.
+
+            validateattributes(t_us, {'numeric'}, {'real','finite'}, mfilename, 't_us');
+            validateattributes(LHV_fuel_MJ_kg, {'numeric'}, {'scalar','real','positive'}, mfilename, 'LHV_fuel_MJ_kg');
+            validateattributes(a, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'a');
+            validateattributes(b, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'b');
+
+            % convert input microseconds to ms because a and b are in mg/ms units
+            t_ms = double(t_us) * 1e-3;
+            % cumulative mass in mg: M(t_ms) = 0.5*a*t_ms.^2 + b.*t_ms + c
+            if nargin < 5 || isempty(c)
+                c = 0;
+            end
+            M_cum_mg = 0.5 * a .* (t_ms.^2) + b .* t_ms + c;
+            % guard small negative rounding errors
+            M_cum_mg = max(M_cum_mg, 0);
+
+            % Convert mg -> kg and apply LHV (MJ/kg -> J/kg)
+            M_cum_kg = M_cum_mg * 1e-6;
+            LHV_J_per_kg = LHV_fuel_MJ_kg * 1e6;
+            E_cum_J = M_cum_kg .* LHV_J_per_kg;
+        end
+
+        function E_pct = GetEnergyPercent(t_us, E_total_J, LHV_fuel_MJ_kg, a, b, c)
+            % Vectorized percent of total energy reached at times t (microseconds).
+            % Usage: E_pct = CLASS_InjectionEnergy.GetEnergyPercent(t_us, E_total_J, LHV, a, b)
+
+            % default total energy when not provided
+            if nargin < 2 || isempty(E_total_J)
+                E_total_J = 1400; % default total energy [J]
+            end
+            validateattributes(E_total_J, {'numeric'}, {'scalar','real','positive'}, mfilename, 'E_total_J');
+            if nargin < 6 || isempty(c)
+                c = 0;
+            end
+            E_cum = CLASS_InjectionEnergy.GetCumulativeEnergy(t_us, LHV_fuel_MJ_kg, a, b, c);
+            E_pct = 100 .* (E_cum ./ E_total_J);
+            % clamp to [0,100] with tolerance
+            E_pct = min(max(E_pct, 0), 100);
+        end
+
+        function CA_deg = GetCrankAngle(t_us, rpm)
+            % GetCrankAngle  Convert time (microseconds) to crank angle (degrees) for given rpm.
+            %
+            % Usage:
+            %   CA_deg = CLASS_InjectionEnergy.GetCrankAngle(t_us)
+            %   CA_deg = CLASS_InjectionEnergy.GetCrankAngle(t_us, rpm)
             %
             % Inputs:
-            %   E_total_J       - Total energy required [J]
-            %   LHV_fuel_MJ_kg  - Fuel lower heating value [MJ/kg]
-            %   a_rate          - Slope of injection rate dm/dt = a*t + b [mg/ms²]
-            %   b_rate          - Intercept of injection rate [mg/ms]
-            
-            obj.E_total_J = E_total_J;
-            obj.LHV_fuel_MJ_kg = LHV_fuel_MJ_kg;
-            obj.a_rate = a_rate;
-            obj.b_rate = b_rate;
-        end
-        
-        function [slope, intercept, t_100pct] = GetEnergyLinearFunction(obj)
-            % Returns best-fit linear function: energy_pct(t) = slope*t + intercept
-            %
-            % Physical model:
-            %   - Injection rate: m_dot(t) = a*t + b [mg/ms]
-            %   - Cumulative mass: M(t) = 0.5*a*t² + b*t [mg]
-            %   - Cumulative energy: E(t) = M(t) * LHV = (0.5*a*t² + b*t) * LHV * 1e-6 [J]
-            %     (where 1e-6 converts mg→kg and MJ→J: 1e-3 * 1e6)
-            %   - Energy %: E_pct(t) = 100 * E(t) / E_total
-            %
-            % For linear fit, sample energy % at t=0, t=0.5*t_100%, t=t_100%
-            % and fit: E_pct = slope*t + intercept
-            
-            % Step 1: Compute time to inject all required fuel
-            % Total mass needed: M_total = E_total / (LHV * 1e6) [kg] = E_total / (LHV * 1e6) * 1e6 [mg]
-            M_total_mg = obj.E_total_J / (obj.LHV_fuel_MJ_kg * 1e6) * 1e6;
-            
-            % Solve: 0.5*a*t² + b*t = M_total
-            % Quadratic: 0.5*a*t² + b*t - M_total = 0
-            if abs(obj.a_rate) < 1e-12
-                % Linear case: b*t = M_total
-                if abs(obj.b_rate) < 1e-12
-                    error('CLASS_EnergyLinearMap: injection rate is zero (a≈0, b≈0)');
-                end
-                t_100pct = M_total_mg / obj.b_rate;
-            else
-                % Quadratic case
-                A_coeff = 0.5 * obj.a_rate;
-                B_coeff = obj.b_rate;
-                C_coeff = -M_total_mg;
-                discriminant = B_coeff^2 - 4*A_coeff*C_coeff;
-                if discriminant < 0
-                    error('CLASS_EnergyLinearMap: negative discriminant (injection rate insufficient)');
-                end
-                t_sol1 = (-B_coeff + sqrt(discriminant)) / (2*A_coeff);
-                t_sol2 = (-B_coeff - sqrt(discriminant)) / (2*A_coeff);
-                t_100pct = max(t_sol1, t_sol2); % Physical solution (positive time)
-            end
-            
-            % Step 2: Sample energy % at three points for linear fit
-            t_samples = [0, 0.5*t_100pct, t_100pct];
-            E_pct_samples = zeros(1, 3);
-            
-            for i = 1:3
-                t = t_samples(i);
-                E_pct_samples(i) = obj.GetEnergyPercent(t);
-            end
-            
-            % Step 3: Least-squares linear fit E_pct = slope*t + intercept
-            % Use all three points; MATLAB's polyfit (degree 1) gives best fit
-            p = polyfit(t_samples, E_pct_samples, 1);
-            slope = p(1);      % Energy % per ms
-            intercept = p(2);  % Energy % at t=0
-        end
-        
-        function E_cum_J = GetCumulativeEnergy(obj, t)
-            % Returns cumulative energy injected at time t.
-            %
-            % Input:
-            %   t - Time [ms]
+            %   t_us   - time in microseconds (scalar or vector)
+            %   rpm - engine speed in RPM (optional, default 1400)
             %
             % Output:
-            %   E_cum_J - Cumulative energy [J]
-            
-            % Cumulative mass: M(t) = 0.5*a*t² + b*t [mg]
-            M_cum_mg = 0.5 * obj.a_rate * t^2 + obj.b_rate * t;
-            
-            % Convert to kg and apply LHV
-            M_cum_kg = M_cum_mg * 1e-6;
-            E_cum_J = M_cum_kg * obj.LHV_fuel_MJ_kg * 1e6; % [J]
+            %   CA_deg - crank angle in degrees (same shape as t_us)
+
+            if nargin < 2 || isempty(rpm)
+                rpm = 1400; % default RPM
+            end
+            validateattributes(t_us, {'numeric'}, {'real','finite'}, mfilename, 't_us');
+            validateattributes(rpm, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'rpm');
+            % CA [deg] = 360 * revolutions = 360 * (rpm/60) * t_seconds
+            % t provided in microseconds -> t_seconds = t_us * 1e-6
+            % Therefore CA = 360*(rpm/60)*t_us*1e-6 = 6e-6 * rpm * t_us
+            CA_deg = 6e-6 .* double(rpm) .* double(t_us);
         end
-        
-        function E_pct = GetEnergyPercent(obj, t)
-            % Returns cumulative energy as a percentage of total (0–100%).
+
+        function tbl = GetPercentTable(E_total_J, LHV_fuel_MJ_kg, a, b, c, step_percent, rpm)
+            % GetPercentTable  Build a table of percent steps vs energy/time/CA.
             %
-            % Input:
-            %   t - Time [ms]
-            %
-            % Output:
-            %   E_pct - Energy percentage [0, 100]
-            
-            E_cum = obj.GetCumulativeEnergy(t);
-            E_pct = 100 * E_cum / obj.E_total_J;
+            % Returns a table with columns: Pct, Energy_J, Time_us, Time_ms, CA_deg
+            if nargin < 1 || isempty(E_total_J)
+                E_total_J = 1400;
+            end
+            if nargin < 5 || isempty(c)
+                c = 0;
+            end
+            if nargin < 6 || isempty(step_percent)
+                step_percent = 10;
+            end
+            if nargin < 7 || isempty(rpm)
+                rpm = 1400;
+            end
+
+            validateattributes(E_total_J, {'numeric'}, {'scalar','real','positive'}, mfilename, 'E_total_J');
+            validateattributes(LHV_fuel_MJ_kg, {'numeric'}, {'scalar','real','positive'}, mfilename, 'LHV_fuel_MJ_kg');
+            validateattributes(a, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'a');
+            validateattributes(b, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'b');
+            validateattributes(step_percent, {'numeric'}, {'scalar','integer','>=',1,'<=',100}, mfilename, 'step_percent');
+            validateattributes(rpm, {'numeric'}, {'scalar','real','finite','positive'}, mfilename, 'rpm');
+            validateattributes(c, {'numeric'}, {'scalar','real','finite','nonnan'}, mfilename, 'c');
+
+            pcts = 0:step_percent:100;
+            n = numel(pcts);
+            Energy_J = (pcts/100) .* E_total_J;
+            Time_us = nan(size(Energy_J));
+            Time_ms = nan(size(Energy_J));
+            CA_deg = nan(size(Energy_J));
+
+            for ii = 1:n
+                E_i = Energy_J(ii);
+                M_i_mg = E_i / LHV_fuel_MJ_kg; % mg (see class convention)
+
+                if abs(a) < 1e-15
+                    if abs(b) < 1e-15
+                        Time_ms(ii) = NaN;
+                    else
+                        Time_ms(ii) = (M_i_mg - c) / b;
+                    end
+                else
+                    A = 0.5 * a;
+                    B = b;
+                    C = c - M_i_mg;
+                    disc = B.^2 - 4*A.*C;
+                    if disc < 0
+                        Time_ms(ii) = NaN;
+                    else
+                        t1 = (-B + sqrt(disc)) / (2*A);
+                        t2 = (-B - sqrt(disc)) / (2*A);
+                        tpos = max(t1,t2);
+                        if tpos < 0
+                            Time_ms(ii) = NaN;
+                        else
+                            Time_ms(ii) = tpos;
+                        end
+                    end
+                end
+
+                Time_us(ii) = Time_ms(ii) * 1e3;
+                CA_deg(ii) = CLASS_InjectionEnergy.GetCrankAngle(Time_us(ii), rpm);
+            end
+
+            tbl = table(pcts(:), Energy_J(:), Time_us(:), Time_ms(:), CA_deg(:), ...
+                'VariableNames', {'Pct','Energy_J','Time_us','Time_ms','CA_deg'});
         end
     end
 end
